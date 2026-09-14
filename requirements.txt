@@ -1,0 +1,23 @@
+# Núcleo
+streamlit>=1.36
+numpy>=1.26
+pandas>=2.1
+scipy>=1.11
+scikit-learn>=1.4
+matplotlib>=3.8
+plotly>=5.20
+Pillow>=10.0
+joblib>=1.3
+
+# Optimización bayesiana de hiperparámetros.
+# Sin optuna el pipeline cae automáticamente a una búsqueda en grid manual.
+optuna>=3.6
+
+# Kriging geoestadístico.
+# Sin pykrige se usa el motor local propio incluido en core/kriging.py.
+pykrige>=1.7
+
+# Lectura de la georreferencia de imágenes GeoTIFF (opcional).
+# Sin rasterio se intenta leer las etiquetas GeoTIFF con Pillow y, si no,
+# se piden las esquinas manualmente en la interfaz.
+rasterio>=1.3
