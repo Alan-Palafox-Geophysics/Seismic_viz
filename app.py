@@ -25,14 +25,45 @@ RAIZ = Path(__file__).resolve().parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-from tabs import tab1_integracion, tab2_topografia, tab3_visualizacion  # noqa: E402
-
 st.set_page_config(
     page_title="TRS + MASW — Integración, modelado y visualización",
     page_icon="⛰️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# La importación va después de `set_page_config` (que debe ser el primer
+# comando de Streamlit) para poder mostrar un diagnóstico legible cuando el
+# entorno tiene binarios incompatibles en vez de un traceback crudo.
+try:
+    from tabs import tab1_integracion, tab2_topografia, tab3_visualizacion  # noqa: E402
+except ImportError as _exc:  # entorno con binarios incompatibles
+    _mensaje = str(_exc)
+    _abi = any(
+        s in _mensaje.lower()
+        for s in (
+            "numpy.core.multiarray failed to import",
+            "numpy.dtype size changed",
+            "binary incompatibility",
+            "_array_api not found",
+        )
+    )
+    st.error(f"No se pudieron cargar las dependencias: {_mensaje}")
+    if _abi:
+        st.markdown(
+            "**Conflicto de binarios con NumPy.** Algún paquete compilado "
+            "(matplotlib, scipy, scikit-learn…) fue construido contra otra versión "
+            "mayor de NumPy que la instalada. Ocurre al instalar con `pip` sobre un "
+            "entorno conda que ya traía esos paquetes.\n\n"
+            "Ejecute `python check_entorno.py` para el diagnóstico completo, o "
+            "cree un entorno limpio:\n"
+            "```\n"
+            "conda create -n trs python=3.11 -y\n"
+            "conda activate trs\n"
+            "pip install -r requirements.txt\n"
+            "```"
+        )
+    st.stop()
 
 ESTILO = """
 <style>

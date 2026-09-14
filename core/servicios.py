@@ -120,6 +120,9 @@ def proyectar_vs(
     clip_predictions: bool,
     clip_margin_pct: float,
     random_state: int,
+    auto_drop_degenerate: bool = True,
+    leverage_max: float = 5.0,
+    use_engineered_features: bool = True,
 ):
     """
     Ejecuta el pipeline completo de proyección de Vs.
@@ -137,6 +140,9 @@ def proyectar_vs(
         clip_predictions=clip_predictions,
         clip_margin_pct=clip_margin_pct,
         random_state=random_state,
+        auto_drop_degenerate=auto_drop_degenerate,
+        leverage_max=leverage_max,
+        use_engineered_features=use_engineered_features,
     )
     return prediccion.run_full_pipeline(df_entrenamiento, df_malla, config)
 

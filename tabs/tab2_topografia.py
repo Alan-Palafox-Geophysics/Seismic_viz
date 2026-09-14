@@ -277,6 +277,43 @@ def _panel_prediccion() -> None:
             )
             semilla = st.number_input("Semilla", 0, 9999, 42, key="t2_seed")
 
+        st.markdown("**Guardas de identificabilidad de los atributos**")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            guardas = st.checkbox(
+                "Descartar atributos no identificables",
+                value=True,
+                key="t2_guardas",
+                help=(
+                    "Elimina los atributos que la geometría de los sondeos no puede "
+                    "sostener: los que son casi constantes entre MASW pero recorren "
+                    "un rango amplio a lo largo del perfil. Sin esta guarda, el "
+                    "modelo produce una rampa lateral en vez de un perfil "
+                    "estratificado."
+                ),
+            )
+        with g2:
+            apalancamiento = st.slider(
+                "Apalancamiento máximo",
+                1.0,
+                20.0,
+                5.0,
+                0.5,
+                key="t2_lev",
+                disabled=not guardas,
+                help="rango en la malla / (2 × desviación en el entrenamiento).",
+            )
+        with g3:
+            interaccion = st.checkbox(
+                "Atributos derivados (Vp·Elevación, dist. al centroide)",
+                value=True,
+                key="t2_deriv",
+                help=(
+                    "Desactívelo si Vp y Elevación salen casi colineales y el perfil "
+                    "muestra estructura lateral que no está en la Vp."
+                ),
+            )
+
         st.caption(
             f"Optimizador: {'Optuna (TPE)' if OPTUNA_DISPONIBLE else 'grid manual'} · "
             f"Kriging: {'pykrige' if PYKRIGE_DISPONIBLE else 'motor local propio'}"
@@ -316,6 +353,9 @@ def _panel_prediccion() -> None:
                     recortar,
                     float(margen),
                     int(semilla),
+                    guardas,
+                    float(apalancamiento),
+                    interaccion,
                 )
             except Exception as exc:
                 st.error(f"Error al generar el perfil: {exc}")
@@ -336,6 +376,9 @@ def _generar(
     recortar,
     margen,
     semilla,
+    guardas,
+    apalancamiento,
+    interaccion,
 ) -> None:
     entrenamiento = pd.concat(
         [asignadas[n]["puntos_vs"] for n in objetivo], ignore_index=True
@@ -356,6 +399,9 @@ def _generar(
         recortar,
         margen,
         semilla,
+        guardas,
+        apalancamiento,
+        interaccion,
     )
 
     st.session_state["resultado_vs"] = resultado
@@ -396,8 +442,8 @@ def _mostrar_resultados() -> None:
     )
     st.caption(
         f"Calidad: **{calificar_rmse_relativo(rel)}** · "
-        f"{met['n_muestras']} muestras en {met['n_splits_espaciales']} pliegues "
-        f"espaciales · correlación Pearson Vp–Vs = "
+        f"{met['n_muestras']} muestras · {resultado['descripcion_cv']} · "
+        f"correlación Pearson Vp–Vs = "
         f"{resultado['correlacion_vp_vs']:.3f} · "
         f"hiperparámetros: {resultado['best_params']} "
         f"({resultado['diagnostico_optimizacion']['motor']}, "
@@ -411,6 +457,29 @@ def _mostrar_resultados() -> None:
 
     for aviso in resultado["avisos"]:
         st.warning(aviso)
+
+    usados = resultado["feature_list"]
+    descartados = [c for c in resultado["feature_list_completa"] if c not in usados]
+    st.caption(
+        f"Atributos usados por el modelo: **{', '.join(usados)}**"
+        + (f" · descartados: {', '.join(descartados)}" if descartados else "")
+    )
+    with st.expander(
+        "Identificabilidad de los atributos — por qué se descartó cada uno",
+        expanded=bool(descartados),
+    ):
+        st.caption(
+            "`apalancamiento = rango en la malla / (2 × desviación en el "
+            "entrenamiento)`. Un valor alto significa que el atributo apenas "
+            "varía entre los sondeos pero recorre un rango amplio a lo largo del "
+            "perfil: el escalador lo normaliza con una desviación diminuta y su "
+            "contribución se amplifica sin control al predecir."
+        )
+        st.dataframe(
+            resultado["reporte_atributos"].round(3),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     e1, e2 = st.columns(2)
     with e1:

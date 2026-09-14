@@ -42,7 +42,7 @@ from sklearn.cluster import KMeans
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, KFold
 from sklearn.preprocessing import StandardScaler
 
 from .kriging import (
@@ -106,6 +106,18 @@ class PipelineConfig:
 
     clip_predictions: bool = True
     clip_margin_pct: float = 0.15
+
+    # --- Guardas de identificabilidad de los atributos espaciales ---------
+    # Un atributo casi constante en el entrenamiento pero que recorre un
+    # rango amplio en la malla tiene apalancamiento ilimitado: el escalador
+    # lo normaliza con una desviación diminuta y cualquier coeficiente,
+    # por pequeño que parezca, se amplifica al predecir.  Es el mecanismo
+    # que convierte un modelo estratificado en una rampa lateral.
+    auto_drop_degenerate: bool = True
+    leverage_max: float = 5.0
+    spatial_cols: Tuple[str, ...] = ("X", "Y", "dist_centroide")
+    # Atributos que nunca se descartan: son el núcleo petrofísico.
+    core_cols: Tuple[str, ...] = ("Vp", "Elevacion")
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +285,193 @@ def get_n_splits(groups: np.ndarray) -> int:
     return int(min(max(n_grupos, 2), 10))
 
 
+def construir_cv(groups: np.ndarray, n_muestras: int, random_state: int):
+    """
+    Devuelve ``(cv, grupos_para_split, descripción)``.
+
+    Con dos o más grupos espaciales se usa ``GroupKFold`` (Leave-One-Line-Out
+    si la estrategia es 'line').  Con **un solo grupo** GroupKFold no puede
+    partir nada, así que se cae a ``KFold`` aleatorio y se avisa: el error
+    resultante ya no es espacialmente honesto, porque los pliegues comparten
+    la misma vertical.
+    """
+    n_grupos = len(np.unique(groups))
+
+    if n_grupos >= 2:
+        n_splits = get_n_splits(groups)
+        return (
+            GroupKFold(n_splits=n_splits),
+            groups,
+            f"GroupKFold, {n_splits} pliegues ({n_grupos} grupos espaciales)",
+        )
+
+    n_splits = int(min(5, max(2, n_muestras // 4)))
+    return (
+        KFold(n_splits=n_splits, shuffle=True, random_state=random_state),
+        None,
+        f"KFold aleatorio, {n_splits} pliegues — sólo hay 1 grupo espacial, "
+        "el error NO es espacialmente honesto",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4b. Identificabilidad y apalancamiento de los atributos
+# ---------------------------------------------------------------------------
+def diagnosticar_atributos(
+    train_df: pd.DataFrame,
+    grid_df: pd.DataFrame,
+    feature_list: List[str],
+    config: PipelineConfig,
+) -> Tuple[List[str], pd.DataFrame, List[str]]:
+    """
+    Decide qué atributos son utilizables y explica por qué se descarta cada uno.
+
+    Se aplican dos guardas, en este orden:
+
+    1. **Identificabilidad espacial.**  Los atributos de posición (``X``,
+       ``Y``, ``dist_centroide``) sólo pueden sostener una tendencia si hay
+       suficientes *sitios* distintos de MASW.  Con ``n`` atributos
+       espaciales hacen falta al menos ``n + 2`` sitios; con dos sitios, un
+       plano queda determinado exactamente y el ajuste no tiene residuo del
+       que aprender: cualquier diferencia de Vs entre líneas se atribuye
+       íntegramente a la posición.
+
+    2. **Apalancamiento.**  ``apalancamiento = rango_en_malla / (2·σ_train)``.
+       Si un atributo apenas varía en el entrenamiento pero recorre un rango
+       amplio en la malla, el escalador lo normaliza con una σ diminuta y su
+       contribución se amplifica sin control al predecir.  Caso típico: los
+       MASW se ubican en el centro de líneas casi paralelas, de modo que
+       ``Y`` varía centímetros entre sondeos y decenas de metros a lo largo
+       del perfil.
+
+    Los atributos de ``config.core_cols`` (Vp y Elevación) nunca se
+    descartan: son la física que el modelo debe aprender.
+
+    Returns
+    -------
+    usables : list[str]
+    reporte : pd.DataFrame
+    avisos : list[str]
+    """
+    x_col, y_col = config.coord_cols
+    sitios = train_df[[x_col, y_col]].drop_duplicates()
+    n_sitios = int(len(sitios))
+
+    espaciales = [c for c in feature_list if c in config.spatial_cols]
+    sitios_necesarios = len(espaciales) + 2
+    espacial_identificable = n_sitios >= sitios_necesarios
+
+    filas: List[Dict[str, Any]] = []
+    usables: List[str] = []
+    avisos: List[str] = []
+
+    for col in feature_list:
+        std_train = float(train_df[col].std(ddof=0)) if col in train_df.columns else 0.0
+        rango_grid = float(grid_df[col].max() - grid_df[col].min())
+
+        apalancamiento = np.inf
+        if std_train > 1e-12:
+            apalancamiento = rango_grid / (2.0 * std_train)
+
+        decision, motivo = "usado", ""
+
+        if col in config.core_cols:
+            decision, motivo = "usado", "núcleo petrofísico"
+        else:
+            if col in espaciales and not espacial_identificable:
+                decision = "descartado"
+                motivo = (
+                    f"sólo {n_sitios} sitio(s) de MASW; se necesitan "
+                    f"{sitios_necesarios} para {len(espaciales)} atributos espaciales"
+                )
+            else:
+                if std_train <= 1e-12:
+                    decision = "descartado"
+                    motivo = "constante en el entrenamiento (no identificable)"
+                else:
+                    if apalancamiento > config.leverage_max:
+                        decision = "descartado"
+                        motivo = (
+                            f"apalancamiento {apalancamiento:.1f} > "
+                            f"{config.leverage_max:g}"
+                        )
+
+        if not config.auto_drop_degenerate:
+            decision, motivo = "usado", "guardas desactivadas"
+
+        filas.append(
+            {
+                "variable": col,
+                "std_train": std_train,
+                "rango_grid": rango_grid,
+                "apalancamiento": apalancamiento,
+                "decision": decision,
+                "motivo": motivo,
+            }
+        )
+        if decision == "usado":
+            usables.append(col)
+
+    descartados = [f["variable"] for f in filas if f["decision"] == "descartado"]
+    if descartados:
+        avisos.append(
+            "Atributos descartados por no ser identificables con esta geometría: "
+            f"**{', '.join(descartados)}**. Un atributo casi constante entre los "
+            "sondeos pero que recorre un rango amplio a lo largo del perfil se "
+            "amplifica al predecir y convierte un modelo estratificado en una "
+            "rampa lateral. La estructura espacial la aporta el kriging de "
+            "residuos, que es donde corresponde."
+        )
+
+    if n_sitios < 3:
+        avisos.append(
+            f"Sólo hay {n_sitios} sitio(s) distintos de MASW en el bloque. El modelo "
+            "sólo puede aprender la relación petrofísica Vp→Vs; no hay información "
+            "para una tendencia lateral y ninguna se impondrá."
+        )
+
+    # Datum de la elevación: si cruza el cero, Vp·Elevacion cambia de signo y
+    # deja de comportarse como una copia reescalada de Vp.
+    if "Vp_x_Elevacion" in usables:
+        if float(train_df["Elevacion"].min()) < 0 < float(train_df["Elevacion"].max()):
+            avisos.append(
+                "Las elevaciones cruzan el cero (datum relativo): el atributo "
+                "`Vp_x_Elevacion` cambia de signo dentro del perfil y deja de ser "
+                "una copia reescalada de Vp, como sí lo era con cotas absolutas. "
+                "Verifique el resultado o trabaje en cotas absolutas (msnm)."
+            )
+
+    # Colinealidad entre los atributos que sí se usan.  En un sondeo 1D la
+    # velocidad crece de forma casi monótona con la profundidad, así que Vp
+    # y Elevación llegan a ser casi la misma variable: el modelo no puede
+    # separar «Vs sube porque Vp sube» de «Vs sube porque bajamos».  En la
+    # malla 2D, en cambio, Vp sí varía lateralmente a profundidad fija, de
+    # modo que el reparto arbitrario entre ambos coeficientes se traduce en
+    # artefactos laterales.
+    numericos = [c for c in usables if c in train_df.columns]
+    if len(numericos) >= 2:
+        corr = train_df[numericos].corr().abs()
+        pares = [
+            (a, b, float(corr.loc[a, b]))
+            for i, a in enumerate(numericos)
+            for b in numericos[i + 1 :]
+            if float(corr.loc[a, b]) > 0.95
+        ]
+        if pares:
+            detalle = "; ".join(f"{a}–{b} (|r| = {v:.3f})" for a, b, v in pares)
+            avisos.append(
+                f"Atributos casi colineales en el entrenamiento: {detalle}. El "
+                "reparto de sus coeficientes es inestable y puede introducir "
+                "variación lateral espuria. Si el perfil 2D sale con estructura "
+                "lateral que no ve en la Vp, suba la regularización (limite el "
+                "rango de `alpha` hacia arriba) o prescinda de la interacción "
+                "`Vp_x_Elevacion` desactivando `use_engineered_features`."
+            )
+
+    reporte = pd.DataFrame(filas)
+    return usables, reporte, avisos
+
+
 # ---------------------------------------------------------------------------
 # 5. Construcción de modelos
 # ---------------------------------------------------------------------------
@@ -376,11 +575,11 @@ def _spatial_cv_rmse(
     groups: np.ndarray,
     random_state: int,
 ) -> float:
-    """RMSE promedio en validación cruzada espacial (GroupKFold)."""
-    gkf = GroupKFold(n_splits=get_n_splits(groups))
+    """RMSE promedio en validación cruzada espacial."""
+    cv, cv_groups, _ = construir_cv(groups, len(X), random_state)
 
     rmses = []
-    for train_idx, val_idx in gkf.split(X, y, groups=groups):
+    for train_idx, val_idx in cv.split(X, y, groups=cv_groups):
         scaler = StandardScaler()
         X_train = scaler.fit_transform(X[train_idx])
         X_val = scaler.transform(X[val_idx])
@@ -501,13 +700,13 @@ def evaluate_model_spatial(
     X = df[feature_list].values
     y = df[config.target_col].values
     groups = create_spatial_groups(df, config)
-    n_splits = get_n_splits(groups)
-    gkf = GroupKFold(n_splits=n_splits)
+    cv, cv_groups, descripcion_cv = construir_cv(groups, len(X), config.random_state)
+    n_splits = cv.get_n_splits()
 
     y_pred_oof = np.full(len(df), np.nan)
     por_grupo = []
 
-    for train_idx, val_idx in gkf.split(X, y, groups=groups):
+    for train_idx, val_idx in cv.split(X, y, groups=cv_groups):
         scaler = StandardScaler()
         X_train = scaler.fit_transform(X[train_idx])
         X_val = scaler.transform(X[val_idx])
@@ -535,10 +734,11 @@ def evaluate_model_spatial(
         "r2": float(r2_score(y, y_pred_oof)),
         "rmse_sobre_std_objetivo": rmse / y_std if y_std > 0 else np.nan,
         "n_muestras": int(len(df)),
-        "n_splits_espaciales": n_splits,
+        "n_splits_espaciales": int(n_splits),
     }
 
     return {
+        "descripcion_cv": descripcion_cv,
         "metrics": metrics,
         "y_true": y,
         "y_pred_oof": y_pred_oof,
@@ -808,7 +1008,14 @@ def run_full_pipeline(
     # 3. Ingeniería de atributos (centroide del entrenamiento, reutilizado)
     train_df, centroid = engineer_features(train_df, config, centroid=None)
     grid_df, _ = engineer_features(grid_df, config, centroid=centroid)
-    feature_list = get_full_feature_list(config)
+    feature_list_completa = get_full_feature_list(config)
+
+    # 3b. Guardas de identificabilidad: se descartan los atributos que la
+    # geometría de los sondeos no puede sostener.
+    feature_list, reporte_atributos, av = diagnosticar_atributos(
+        train_df, grid_df, feature_list_completa, config
+    )
+    avisos += av
 
     nota_extrapolacion = None
     if not model_supports_extrapolation(config.model_type):
@@ -869,8 +1076,11 @@ def run_full_pipeline(
         grid_df["flag_extrapolacion_petrofisica"] = flag_out_of_range(
             train_df, grid_df, list(config.petrofisicas_cols)
         )
+        # El reporte por variable se hace sobre la lista completa: es
+        # informativo saber cuánto extrapolan también los atributos que el
+        # modelo no llegó a usar.
         diagnostico_extrapolacion = diagnose_extrapolation_by_feature(
-            train_df, grid_df, feature_list
+            train_df, grid_df, feature_list_completa
         )
     else:
         grid_df["flag_extrapolacion_general"] = False
@@ -892,9 +1102,12 @@ def run_full_pipeline(
         "scaler": scaler,
         "config": config,
         "feature_list": feature_list,
+        "feature_list_completa": feature_list_completa,
+        "reporte_atributos": reporte_atributos,
         "centroide": centroid,
         "best_params": best_params,
         "diagnostico_optimizacion": diag_opt,
+        "descripcion_cv": evaluacion["descripcion_cv"],
         "metrics": evaluacion["metrics"],
         "metricas_por_grupo": evaluacion["por_grupo"],
         "residuos": evaluacion["residuos"],

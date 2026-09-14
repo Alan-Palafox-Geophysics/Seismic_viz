@@ -4,9 +4,46 @@ Aplicación Streamlit para procesar, modelar y visualizar datos de **Sísmica de
 Refracción (TRS)** y **MASW**. Toda la lógica se extrajo de los notebooks y
 módulos del proyecto y se reorganizó en funciones modulares y cacheables.
 
+## Instalación
+
+Instale en un entorno **limpio**. Mezclar `pip` sobre un entorno conda que ya
+traía matplotlib, scipy o scikit-learn deja dos cadenas de binarios y rompe la
+ABI de NumPy.
+
 ```
+conda create -n trs python=3.11 -y
+conda activate trs
+pip install -r requirements.txt
+
+python check_entorno.py     # verifica versiones y conflictos
 streamlit run app.py
 ```
+
+### Si aparece `ImportError: numpy.core.multiarray failed to import`
+
+No es un fallo de la aplicación. Significa que un paquete compilado
+(matplotlib, scipy, scikit-learn, pykrige…) fue construido contra una versión
+mayor de NumPy distinta de la instalada. `python check_entorno.py` identifica
+cuáles y sugiere el comando exacto. Las dos salidas posibles:
+
+```
+# Recomendado: entorno limpio
+conda create -n trs python=3.11 -y && conda activate trs
+pip install -r requirements.txt
+
+# Reparar el entorno actual, sin mezclar gestores
+pip install --force-reinstall --no-cache-dir numpy pandas scipy scikit-learn matplotlib
+```
+
+Si alguna otra herramienta de ese entorno exige NumPy 1.x, fije esa rama y
+reconstruya el resto contra ella:
+
+```
+pip install --force-reinstall --no-cache-dir "numpy<2" pandas scipy scikit-learn matplotlib
+```
+
+La aplicación funciona igual con NumPy 1.x y 2.x; lo que no tolera es tener
+binarios de ambas ramas conviviendo.
 
 ---
 
@@ -15,6 +52,7 @@ streamlit run app.py
 ```
 masw_trs_app/
 ├── app.py                      Punto de entrada, estado de sesión, barra lateral
+├── check_entorno.py            Diagnóstico de dependencias y conflictos de ABI
 ├── requirements.txt
 ├── core/                       Núcleo independiente de Streamlit
 │   ├── io_utils.py             Lectores tolerantes (TRS .dat, MASW, topografía, modelos 2D)
@@ -145,6 +183,64 @@ donde no hay modelo de velocidades.
 **Exportación.** Lista desplegable de perfiles generados, CSV en formato
 `X, Y, Z, V` (con `Z` en elevación o profundidad), perfil completo, modelo del
 bloque y artefactos `joblib` del modelo entrenado.
+
+### Identificabilidad de los atributos espaciales
+
+El pipeline original usa `X`, `Y` y `dist_centroide` como atributos. Eso funciona
+cuando los MASW están genuinamente repartidos por el área — como en Iyotla, con
+cuatro sondeos separados decenas de metros en ambas direcciones. **No funciona
+cuando hay un MASW por línea, ubicado en el centro del tendido.**
+
+El mecanismo: si dos líneas vecinas corren casi paralelas, la `Y` de sus dos
+sondeos difiere en centímetros, mientras que a lo largo de cada perfil la `Y`
+recorre decenas de metros. El `StandardScaler` normaliza `Y` con esa desviación
+diminuta, de modo que a lo largo del perfil el valor escalado alcanza ±58. Un
+coeficiente que en la tabla de importancias parece insignificante queda
+multiplicado por eso, y cualquier diferencia real de Vs entre las dos líneas se
+atribuye íntegramente a la posición y se extrapola sobre toda la sección. El
+resultado es una **rampa lateral** en lugar de un perfil estratificado.
+
+Medido con Los Cuates L1 + L2, comparando la desviación de Vs entre bandas de
+elevación contra la desviación entre bandas de `Xo` (la Vp medida da 9.5):
+
+| Diferencia entre los dos MASW | vertical / lateral | Rango de Vs |
+|---|---|---|
+| 0 % | 9.2 | 201 – 582 |
+| 5 % | **0.52** | −93 – 839 |
+| 15 % | **0.18** | −731 – 1353 |
+| 30 % | **0.09** | −1687 – 2125 |
+
+Con un 5 % de diferencia la variación lateral ya supera a la vertical.
+
+La aplicación aplica dos guardas antes de entrenar, y muestra la tabla completa
+en *«Identificabilidad de los atributos»*:
+
+1. **Identificabilidad espacial** — con `n` atributos de posición hacen falta al
+   menos `n + 2` sitios distintos de MASW. Con dos sitios, un plano queda
+   determinado exactamente y no hay residuo del que aprender.
+2. **Apalancamiento** — `rango en la malla / (2 × desviación en el entrenamiento)`.
+   Por encima del umbral (5 por defecto) el atributo se descarta.
+
+`Vp` y `Elevación` nunca se descartan: son la física que el modelo debe
+aprender. La estructura espacial entra entonces por el kriging de residuos, que
+es donde corresponde. Con las guardas activas el resultado deja de depender de
+la diferencia entre MASW (vertical/lateral = 3.6 en los cuatro casos de la
+tabla).
+
+Puede desactivarlas para reproducir el comportamiento anterior.
+
+### Colinealidad Vp – Elevación
+
+En un sondeo 1D la velocidad crece de forma casi monótona con la profundidad: en
+Los Cuates, `corr(Vp, Elevacion) = −0.995`. El modelo no puede separar «Vs sube
+porque Vp sube» de «Vs sube porque bajamos». Con `alpha` pequeño, Ridge reparte
+la contribución en coeficientes grandes y opuestos (−833 para Elevación, −331
+para Vp, +398 para la interacción), y ese reparto arbitrario reaparece como
+variación lateral al aplicarse a la malla 2D, donde Vp **sí** varía a
+profundidad fija.
+
+La aplicación lo detecta y lo avisa. Si el perfil muestra estructura lateral que
+no está en la Vp, suba la regularización o desactive *«Atributos derivados»*.
 
 ### Una zona por bloque
 

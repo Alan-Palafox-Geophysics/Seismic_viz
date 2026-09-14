@@ -1,3 +1,14 @@
+# IMPORTANTE: instale estas dependencias en un entorno LIMPIO.
+#
+#     conda create -n trs python=3.11 -y
+#     conda activate trs
+#     pip install -r requirements.txt
+#
+# Instalar con pip sobre un entorno conda que ya traía matplotlib/scipy/
+# scikit-learn mezcla dos cadenas de binarios y produce el error
+# "ImportError: numpy.core.multiarray failed to import".
+# Ejecute `python check_entorno.py` para diagnosticarlo.
+
 # Núcleo
 streamlit>=1.36
 numpy>=1.26
