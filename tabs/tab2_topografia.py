@@ -56,9 +56,20 @@ def _rerun() -> None:
             return
 
 
-def _registrar_perfil(nombre: str, df, topo_linea, origen: str) -> None:
+def _registrar_perfil(
+    nombre: str,
+    df,
+    topo_linea,
+    origen: str,
+    zona: str | None = None,
+    linea: str | None = None,
+) -> None:
     """
     Guarda un perfil 2D en la sesión y lo deja seleccionado en el Tab 3.
+
+    ``zona`` y ``linea`` guardan la identidad real del perfil, independiente
+    de la clave con que se almacena: dos zonas pueden tener una línea con el
+    mismo nombre y no deben confundirse entre sí.
 
     El multiselect del Tab 3 conserva su valor entre ejecuciones, así que su
     ``default`` se ignora una vez que el usuario tocó el control: hay que
@@ -71,6 +82,8 @@ def _registrar_perfil(nombre: str, df, topo_linea, origen: str) -> None:
         "df": df,
         "topo_linea": topo_linea,
         "origen": origen,
+        "zona": zona,
+        "linea": linea,
     }
     if "t3_sel" in st.session_state:
         seleccion = list(st.session_state["t3_sel"])
@@ -83,79 +96,6 @@ def _etiqueta_origen(df: pd.DataFrame, base: str) -> str:
     """Describe un perfil por las variables de velocidad que ya contiene."""
     presentes = [c for c in ("Vp", "Vs") if c in df.columns]
     return f"{base} {'+'.join(presentes)}" if presentes else base
-
-
-def _fusionar_sintetica(
-    nombre: str,
-    df_nuevo: pd.DataFrame,
-    variable: str,
-    topo_linea: pd.DataFrame,
-) -> str | None:
-    """
-    Agrega la variable recién sintetizada al perfil de esa línea, **sin borrar
-    lo que ya tuviera**.
-
-    Sintetizar Vp y después Vs sobre la misma línea objetivo produce dos
-    mallas con idéntica geometría (misma topografía, misma profundidad y
-    mismo ``dz``), así que la segunda sólo aporta columnas nuevas.  Se
-    empalman por ``(Xo, Elevacion)``; si el usuario cambió la geometría entre
-    una síntesis y otra las mallas no casan, y entonces el perfil se
-    reemplaza avisándolo en vez de mezclar nodos que no se corresponden.
-
-    Returns
-    -------
-    str | None
-        Aviso para el usuario cuando hubo que reemplazar, o ``None``.
-    """
-    perfiles = st.session_state.setdefault("perfiles_2d", {})
-    previo = perfiles.get(nombre)
-    aviso = None
-
-    claves = ["Xo", "Elevacion"]
-    fusionado = None
-
-    if previo is not None and isinstance(previo.get("df"), pd.DataFrame):
-        df_previo = previo["df"]
-        if all(c in df_previo.columns for c in claves) and all(
-            c in df_nuevo.columns for c in claves
-        ):
-            aportadas = [variable] + [
-                c for c in df_nuevo.columns if c.startswith("Varianza_")
-            ]
-            izq = df_previo.drop(columns=aportadas, errors="ignore").copy()
-            izq["_k"] = list(zip(izq["Xo"].round(4), izq["Elevacion"].round(4)))
-
-            der = df_nuevo.copy()
-            der["_k"] = list(zip(der["Xo"].round(4), der["Elevacion"].round(4)))
-            mapa = der.set_index("_k")[aportadas]
-            mapa = mapa[~mapa.index.duplicated(keep="first")]
-
-            unido = izq.join(mapa, on="_k")
-            cobertura = float(unido[variable].notna().mean())
-
-            if cobertura >= 0.95:
-                fusionado = unido.drop(columns=["_k"])
-            else:
-                aviso = (
-                    f"La malla de esta síntesis no coincide con la del perfil "
-                    f"«{nombre}» que ya existía (sólo empalma el "
-                    f"{100 * cobertura:.0f} % de los nodos): probablemente cambió "
-                    "la profundidad o el paso vertical. El perfil se reemplazó. "
-                    "Para conservar ambas variables, vuelva a sintetizarlas con "
-                    "la misma profundidad y el mismo dz."
-                )
-
-    df_final = fusionado if fusionado is not None else df_nuevo
-    df_final = df_final.copy()
-    df_final["Linea"] = nombre
-
-    _registrar_perfil(
-        nombre,
-        df_final,
-        topo_linea,
-        _etiqueta_origen(df_final, "sintética") + " · kriging 3D",
-    )
-    return aviso
 
 
 def _sincronizar_seleccion_3d() -> None:
@@ -832,8 +772,11 @@ def _panel_sintetica() -> None:
         st.caption(
             "Para trazas donde no hay modelo de velocidades: se interpola desde las "
             "líneas vecinas con kriging ordinario 3D y anisotropía vertical "
-            "(rango_z = rango_xy × factor)."
+            "(rango_z = rango_xy × factor). **Vp y Vs se generan en un solo paso**, "
+            "sobre la misma malla, de modo que el perfil sintético queda completo "
+            "de una vez."
         )
+
         s1, s2, s3 = st.columns(3)
         with s1:
             fuentes = st.multiselect(
@@ -842,7 +785,6 @@ def _panel_sintetica() -> None:
                 default=list(asignadas.keys()),
                 key="t2s_fuentes",
             )
-            variable = st.selectbox("Variable", ["Vp", "Vs"], key="t2s_var")
         with s2:
             zona_s = st.selectbox(
                 "Zona de la línea objetivo",
@@ -872,50 +814,89 @@ def _panel_sintetica() -> None:
                 "Rango horizontal (m)", 10.0, 5000.0, 500.0, 10.0, key="t2s_rango"
             )
 
-        if st.button("Generar línea sintética") and fuentes:
-            topo_obj = espacial.topografia_de_linea(df_topo, zona_s, linea_s)
-
-            partes = []
-            for n in fuentes:
-                if variable == "Vp":
-                    partes.append(asignadas[n]["df_source"])
-                else:
-                    pf = st.session_state.get("perfiles_2d", {}).get(n)
-                    if pf is None:
-                        st.error(
-                            f"La línea «{n}» aún no tiene Vs 2D. Genere primero el "
-                            "perfil 2D."
-                        )
-                        return
-                    partes.append(pf["df"])
-            df_source = pd.concat(partes, ignore_index=True)
-
-            with st.spinner("Kriging ordinario 3D…"):
-                df_sint, info = servicios.sintetizar_linea_kriging(
-                    df_source,
-                    topo_obj,
-                    variable,
-                    st.session_state.get("t2_var", "spherical"),
-                    float(aniso),
-                    float(rango),
-                    float(prof_max),
-                    float(dz),
-                )
-            # El nombre del perfil es el de la «Línea objetivo», tal cual.
-            # Si esa línea ya se sintetizó en la otra variable, ambas se
-            # acumulan en un único perfil en vez de sobrescribirse.
-            nombre = str(linea_s)
-            aviso_fusion = _fusionar_sintetica(nombre, df_sint, variable, topo_obj)
-
-            df_guardado = st.session_state["perfiles_2d"][nombre]["df"]
-            variables = ", ".join(c for c in ("Vp", "Vs") if c in df_guardado.columns)
-            st.session_state["aviso_sintetica"] = (
-                f"Línea sintética «{nombre}» — {variable} generada con "
-                f"{info['n_objetivo']} nodos a partir de {info['n_fuente']} puntos "
-                f"fuente (motor: {info['motor_kriging']}). "
-                f"El perfil contiene ahora: {variables}."
+        # La Vs sólo puede sintetizarse desde líneas que ya tengan Vs 2D, es
+        # decir, después de haber corrido el pipeline del Tab 2.
+        perfiles = st.session_state.get("perfiles_2d", {})
+        con_vs = [
+            n
+            for n in fuentes
+            if isinstance(perfiles.get(n, {}).get("df"), pd.DataFrame)
+            and "Vs" in perfiles[n]["df"].columns
+        ]
+        if fuentes and not con_vs:
+            st.warning(
+                "Ninguna de las líneas fuente tiene Vs 2D todavía, así que sólo se "
+                "sintetizará Vp. Corra antes «Generar Perfil 2D» para que la Vs "
+                "también se sintetice."
             )
-            st.session_state["aviso_fusion"] = aviso_fusion
+
+        if st.button("Generar línea sintética (Vp y Vs)") and fuentes:
+            topo_obj = espacial.topografia_de_linea(df_topo, zona_s, linea_s)
+            variograma = st.session_state.get("t2_var", "spherical")
+
+            # Fuente de Vp: la malla 2D de cada línea agregada.
+            fuente_vp = pd.concat(
+                [asignadas[n]["df_source"] for n in fuentes], ignore_index=True
+            )
+            # Fuente de Vs: el perfil 2D ya modelado de esas mismas líneas.
+            fuente_vs = (
+                pd.concat([perfiles[n]["df"] for n in con_vs], ignore_index=True)
+                if con_vs
+                else None
+            )
+
+            generadas, detalle = [], []
+            with st.spinner("Kriging ordinario 3D — Vp y Vs…"):
+                df_sint, info_vp = servicios.sintetizar_linea_kriging(
+                    fuente_vp, topo_obj, "Vp", variograma,
+                    float(aniso), float(rango), float(prof_max), float(dz),
+                )
+                generadas.append("Vp")
+                detalle.append(f"Vp desde {info_vp['n_fuente']} puntos")
+
+                if fuente_vs is not None:
+                    df_vs, info_vs = servicios.sintetizar_linea_kriging(
+                        fuente_vs, topo_obj, "Vs", variograma,
+                        float(aniso), float(rango), float(prof_max), float(dz),
+                    )
+                    # Ambas mallas salen de `malla_objetivo` con los mismos
+                    # parámetros, así que están alineadas fila a fila; el
+                    # empalme por (Xo, Elevacion) es sólo una red de seguridad.
+                    if len(df_vs) == len(df_sint):
+                        df_sint["Vs"] = df_vs["Vs"].to_numpy()
+                        df_sint["Varianza_Vs"] = df_vs["Varianza_Vs"].to_numpy()
+                    else:
+                        clave_malla = ["Xo", "Elevacion"]
+                        df_sint = df_sint.merge(
+                            df_vs[clave_malla + ["Vs", "Varianza_Vs"]],
+                            on=clave_malla,
+                            how="left",
+                        )
+                    generadas.append("Vs")
+                    detalle.append(f"Vs desde {info_vs['n_fuente']} puntos")
+
+            # El nombre del perfil es el de la «Línea objetivo», tal cual.
+            clave = str(linea_s)
+            df_sint["Linea"] = clave
+            _registrar_perfil(
+                clave,
+                df_sint,
+                topo_obj,
+                _etiqueta_origen(df_sint, "sintética") + " · kriging 3D",
+                zona=str(zona_s),
+                linea=str(linea_s),
+            )
+
+            st.session_state["aviso_sintetica"] = (
+                f"Línea sintética «{clave}» generada con {len(df_sint)} nodos: "
+                f"{' y '.join(detalle)} (motor: {info_vp['motor_kriging']}). "
+                f"El perfil contiene: {', '.join(generadas)}."
+            )
+            st.session_state["aviso_fusion"] = (
+                None
+                if fuente_vs is not None
+                else "Sólo se sintetizó Vp: las líneas fuente aún no tienen Vs 2D."
+            )
             _rerun()
 
 

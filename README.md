@@ -180,6 +180,15 @@ interpolación por kriging ordinario 3D con anisotropía vertical
 (`rango_z = rango_xy × factor`, 0.05 por defecto). Es la herramienta para trazas
 donde no hay modelo de velocidades.
 
+**Vp y Vs se sintetizan en un solo proceso**, sobre la misma malla y con los
+mismos parámetros, de modo que el perfil sintético queda completo de una vez y
+no hay forma de que una pasada sobrescriba a la otra. La Vp se interpola desde
+las mallas 2D de las líneas fuente y la Vs desde sus perfiles 2D ya modelados,
+así que conviene correr antes «Generar Perfil 2D»; si ninguna fuente tiene Vs
+todavía, se sintetiza sólo Vp y se avisa. El perfil se guarda con el nombre de
+la «Línea objetivo» y aparece de inmediato en el catálogo del Tab 2 y en el
+Tab 3.
+
 **Exportación.** Lista desplegable de perfiles generados, CSV en formato
 `X, Y, Z, V` (con `Z` en elevación o profundidad), perfil completo, modelo del
 bloque y artefactos `joblib` del modelo entrenado.
