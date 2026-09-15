@@ -76,6 +76,24 @@ def _resolver_cmap(cmap):
     return cmap
 
 
+def colormap_a_plotly(cmap=None, n: int = 64) -> list:
+    """
+    Traduce un colormap de matplotlib a una ``colorscale`` de Plotly.
+
+    Devuelve la lista ``[[posición, 'rgb(r,g,b)'], …]`` que entienden
+    ``go.Surface`` y ``go.Scatter3d``.  Es lo que permite usar en el 3D
+    exactamente la misma rampa personalizada que en los cortes 2D, en vez
+    de una escala con nombre distinta.
+    """
+    cm = _resolver_cmap(cmap)
+    escala = []
+    for i in range(n):
+        pos = i / (n - 1)
+        r, g, b = (int(round(255 * c)) for c in cm(pos)[:3])
+        escala.append([pos, f"rgb({r},{g},{b})"])
+    return escala
+
+
 def exportar_slide_2d_recortado(
     df: pd.DataFrame,
     col_x: str = "Xo",

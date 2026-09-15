@@ -22,12 +22,11 @@ import streamlit as st
 from core import servicios
 from core.plots_2d import CMAPS_DISPONIBLES
 from core.plots_3d import (
+    CMAPS_3D,
     agregar_base_satelital_3d_color,
     figura_a_html,
     plot_3d_variable,
 )
-
-CMAPS_3D = ["rainbow", "jet", "turbo", "viridis", "portland", "spectral"]
 
 
 def _fuentes_disponibles() -> dict:
@@ -190,9 +189,42 @@ def render() -> None:
     with c3:
         modo = st.radio("Representación", ["surface", "scatter"], index=0, key="t3_modo")
     with c4:
-        cmap = st.selectbox("Escala de color", CMAPS_3D, index=0, key="t3_cmap")
+        cmap = st.selectbox(
+            "Escala de color",
+            CMAPS_3D,
+            index=0,
+            key="t3_cmap",
+            help=(
+                "La misma lista que los cortes 2D: eligiendo la misma escala en "
+                "ambos, la cortina 3D y la sección impresa comparten rampa."
+            ),
+        )
     with c5:
         grid_res = st.slider("Resolución de la cortina", 20, 200, 60, 10, key="t3_res")
+
+    d1, d2 = st.columns([1, 3])
+    with d1:
+        recortar_3d = st.checkbox(
+            "Recortar la cortina al relieve",
+            value=True,
+            key="t3_recorte3d",
+            help=(
+                "La malla sigue la topografía: arranca en el terreno de cada "
+                "abscisa y baja la profundidad indicada, igual que el corte 2D. "
+                "Sin esto la cortina es un rectángulo que pinta material por "
+                "encima del terreno."
+            ),
+        )
+    with d2:
+        prof_corte = st.number_input(
+            "Profundidad del corte bajo el terreno (m)",
+            1.0,
+            300.0,
+            30.0,
+            1.0,
+            key="t3_prof",
+            help="Se aplica por igual a la cortina 3D y al corte estático 2D.",
+        )
 
     v1, v2, v3 = st.columns([1, 1, 2])
     serie = df_todos[var].replace([np.inf, -np.inf], np.nan).dropna()
@@ -232,6 +264,7 @@ def render() -> None:
             mode=modo,
             cmap=cmap,
             grid_res=grid_res,
+            profundidad_max=float(prof_corte) if recortar_3d else None,
             vmin=vmin,
             vmax=vmax,
             contornos=contornos or None,
@@ -255,18 +288,21 @@ def render() -> None:
     # ------------------------------------------------------------ cortes 2D
     st.divider()
     st.markdown("##### Cortes estáticos 2D")
-    b1, b2, b3, b4 = st.columns(4)
+    st.caption(
+        f"Usan la misma escala «{cmap}», los mismos contornos y la misma "
+        f"profundidad ({prof_corte:g} m) que la cortina 3D de arriba."
+    )
+    b1, b2, b3 = st.columns(3)
     with b1:
         perfil_2d = st.selectbox("Perfil", seleccion, key="t3_p2d")
     with b2:
         cmap_2d = st.selectbox(
-            "Escala", CMAPS_DISPONIBLES, index=0, key="t3_cmap2d"
+            "Escala",
+            CMAPS_DISPONIBLES,
+            index=CMAPS_DISPONIBLES.index(cmap) if cmap in CMAPS_DISPONIBLES else 0,
+            key="t3_cmap2d",
         )
     with b3:
-        prof_corte = st.number_input(
-            "Profundidad del recorte (m)", 1.0, 300.0, 30.0, 1.0, key="t3_prof2d"
-        )
-    with b4:
         metodo = st.selectbox(
             "Interpolación", ["linear", "cubic", "nearest"], key="t3_met2d"
         )

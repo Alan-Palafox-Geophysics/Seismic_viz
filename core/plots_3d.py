@@ -32,6 +32,30 @@ import plotly.graph_objects as go
 from PIL import Image
 from scipy.interpolate import griddata
 
+from .plots_2d import CMAPS_DISPONIBLES, colormap_a_plotly
+
+# Escalas disponibles para el 3D.  Son las mismas que las de los cortes 2D,
+# de modo que una sección impresa y su cortina 3D puedan compartir rampa.
+CMAPS_3D = list(CMAPS_DISPONIBLES)
+
+# Nombres que sólo existen en matplotlib: hay que traducirlos a una
+# colorscale explícita porque Plotly no los conoce.
+_CMAPS_MATPLOTLIB = {
+    "espectro_personalizado",
+    "nipy_spectral",
+    "Spectral_r",
+    "gist_rainbow",
+}
+
+
+def resolver_colorscale(cmap):
+    """Devuelve algo que Plotly entienda: un nombre suyo o una escala explícita."""
+    if cmap is None:
+        return colormap_a_plotly(None)
+    if isinstance(cmap, str) and cmap in _CMAPS_MATPLOTLIB:
+        return colormap_a_plotly(cmap)
+    return cmap
+
 # ---------------------------------------------------------------------------
 # Paleta / estilo "dashboard" (sólo layout, NO toca colorscales de datos)
 # ---------------------------------------------------------------------------
@@ -107,16 +131,33 @@ def construir_curtain(
     z_col: str,
     var_color: str,
     grid_res: int = 60,
+    profundidad_max: float | None = None,
 ) -> dict | None:
     """
-    Interpola ``var_color`` en una malla (distancia a lo largo de la línea)
-    × (elevación) y la proyecta en 3D siguiendo el trazado real de la línea.
+    Interpola ``var_color`` en una malla **que sigue el terreno** y la
+    proyecta en 3D sobre el trazado real de la línea.
+
+    La malla no es un rectángulo ``z.min()…z.max()``: para cada posición a
+    lo largo de la línea, la vertical arranca en la topografía de esa
+    abscisa y baja ``profundidad_max`` metros.  Así la cortina queda
+    recortada por el relieve con el mismo criterio que
+    :func:`core.plots_2d.exportar_slide_2d_recortado` — sin el escalón que
+    producía rellenar el rectángulo por vecino más cercano, que pintaba
+    material por encima del terreno.
+
+    Parameters
+    ----------
+    profundidad_max : float | None
+        Espesor de la cortina bajo la topografía.  Por defecto, el espesor
+        real máximo del modelo, de modo que no se recorta nada.
 
     Returns
     -------
     dict | None
-        ``{'X','Y','Z','V','D','d','x','y'}``; ``None`` si hay menos de 4
-        puntos (el llamador hace fallback a scatter).
+        ``{'X','Y','Z','V','D','d','x','y','superficie','base','Z_cont'}``.
+        ``Z`` lleva ``NaN`` donde la malla cae por debajo del dato (Plotly
+        abre un hueco ahí); ``Z_cont`` es la versión finita que usan los
+        contornos.  ``None`` si hay menos de 4 puntos.
 
     Notas de costo
     --------------
@@ -136,19 +177,58 @@ def construir_curtain(
     # Distancia acumulada a lo largo del trazado (parámetro horizontal)
     d = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
 
-    d_grid = np.linspace(d.min(), d.max(), grid_res)
-    z_grid = np.linspace(z.min(), z.max(), grid_res)
-    D, Z = np.meshgrid(d_grid, z_grid)
+    # Techo y piso del dato en cada estación, igual que el groupby(col_x).max()
+    # que usa el corte 2D para extraer el perfil topográfico.
+    estaciones = pd.DataFrame({"d": d, "z": z}).groupby("d", as_index=False)["z"].agg(
+        ["max", "min"]
+    )
+    estaciones.columns = ["d", "techo", "piso"]
+    if len(estaciones) < 2:
+        return None
 
-    V = griddata((d, z), v, (D, Z), method="linear")
-    V_nn = griddata((d, z), v, (D, Z), method="nearest")
+    d_grid = np.linspace(d.min(), d.max(), grid_res)
+    superficie = np.interp(d_grid, estaciones["d"], estaciones["techo"])
+    piso_dato = np.interp(d_grid, estaciones["d"], estaciones["piso"])
+
+    if profundidad_max is None:
+        profundidad_max = float(np.max(estaciones["techo"] - estaciones["piso"]))
+    profundidad_max = max(float(profundidad_max), 1e-6)
+
+    # Malla que sigue el terreno: profundidad normalizada 0…1 bajo la superficie
+    t = np.linspace(0.0, 1.0, grid_res)
+    D = np.tile(d_grid, (grid_res, 1))
+    S = np.tile(superficie, (grid_res, 1))
+    Z_cont = S - t[:, None] * profundidad_max
+
+    V = griddata((d, z), v, (D, Z_cont), method="linear")
+    V_nn = griddata((d, z), v, (D, Z_cont), method="nearest")
     V = np.where(np.isnan(V), V_nn, V)
+
+    # Por debajo del dato no se inventa nada: se abre hueco, como el blanco
+    # que deja el corte 2D bajo el modelo.
+    fuera = Z_cont < np.tile(piso_dato, (grid_res, 1)) - 1e-9
+    V = np.where(fuera, np.nan, V)
+    Z = np.where(fuera, np.nan, Z_cont)
 
     # Mapear distancia -> (X, Y) reales siguiendo el trazado de la línea
     X = np.interp(D, d, x)
     Y = np.interp(D, d, y)
 
-    return {"X": X, "Y": Y, "Z": Z, "V": V, "D": D, "d": d, "x": x, "y": y}
+    return {
+        "X": X,
+        "Y": Y,
+        "Z": Z,
+        "Z_cont": Z_cont,
+        "V": V,
+        "D": D,
+        "d": d,
+        "x": x,
+        "y": y,
+        "superficie": superficie,
+        "base": superficie - profundidad_max,
+        "d_grid": d_grid,
+        "profundidad_max": profundidad_max,
+    }
 
 
 def _segmentos_contorno(D, Z, V, nivel: float):
@@ -194,7 +274,10 @@ def agregar_contornos_3d(
     la isolínea sigue estrictamente la geometría de la línea y su
     topografía.
     """
-    D, Z, V = curtain["D"], curtain["Z"], curtain["V"]
+    # Los contornos se calculan sobre la malla finita (``Z_cont``); los huecos
+    # ya vienen marcados como NaN en ``V``, que es lo que contourpy respeta.
+    D, V = curtain["D"], curtain["V"]
+    Z = curtain.get("Z_cont", curtain["Z"])
     d, x, y = curtain["d"], curtain["x"], curtain["y"]
 
     primero = True
@@ -232,11 +315,12 @@ def plot_3d_variable(
     line_col: str | None = "Linea",
     fig: go.Figure | None = None,
     mode: str = "surface",
-    cmap: str = "rainbow",
+    cmap: str = "espectro_personalizado",
     point_size: int = 4,
     marker_opacity: float = 1.0,
     connect_points: bool = True,
     grid_res: int = 60,
+    profundidad_max: float | None = None,
     surface_opacity: float = 1.0,
     vmin: float | None = None,
     vmax: float | None = None,
@@ -268,6 +352,7 @@ def plot_3d_variable(
         sobre la cortina (sólo en ``mode='surface'``).
     """
     vmin, vmax = _rango_color(df, var_color, fig, vmin, vmax)
+    escala = resolver_colorscale(cmap)
 
     nueva_figura = fig is None
     if fig is None:
@@ -295,7 +380,9 @@ def plot_3d_variable(
         curtain = None
         usar_surface = mode == "surface"
         if usar_surface:
-            curtain = construir_curtain(df_g, x_col, y_col, z_col, var_color, grid_res)
+            curtain = construir_curtain(
+                df_g, x_col, y_col, z_col, var_color, grid_res, profundidad_max
+            )
             usar_surface = curtain is not None
 
         if usar_surface:
@@ -305,7 +392,7 @@ def plot_3d_variable(
                     y=curtain["Y"],
                     z=curtain["Z"],
                     surfacecolor=curtain["V"],
-                    colorscale=cmap,
+                    colorscale=escala,
                     cmin=vmin,
                     cmax=vmax,
                     opacity=surface_opacity,
@@ -340,7 +427,7 @@ def plot_3d_variable(
                     marker=dict(
                         size=point_size,
                         color=df_g[var_color],
-                        colorscale=cmap,
+                        colorscale=escala,
                         cmin=vmin,
                         cmax=vmax,
                         opacity=marker_opacity,

@@ -254,8 +254,18 @@ inestable — con `ridge` el error puede crecer dos órdenes de magnitud. Modele
 
 ## Tab 3 — Visualización 3D y mapas base
 
-- Cortinas 3D (`mode='surface'`) que siguen el trazado real y la topografía de
-  cada línea, con escala `rainbow` y menús de cámara y visibilidad.
+- Cortinas 3D (`mode='surface'`) construidas sobre una **malla que sigue el
+  terreno**: para cada posición a lo largo de la línea la vertical arranca en la
+  topografía de esa abscisa y baja la profundidad indicada. Antes la malla era
+  un rectángulo `z.min()…z.max()` rellenado por vecino más cercano, que pintaba
+  material por encima del terreno; ahora el recorte es el mismo criterio que
+  usa el corte 2D. Por debajo del dato se abre hueco en vez de extrapolar.
+- **Misma rampa de color que los cortes 2D.** El selector del 3D ofrece la misma
+  lista que el 2D, incluida la rampa personalizada *morado → … → rojo oscuro*,
+  que se traduce a una `colorscale` de Plotly con `colormap_a_plotly`. La
+  profundidad del corte es un único control compartido por la cortina 3D y la
+  sección estática, de modo que ambas son la misma figura vista de dos maneras.
+- Menús de cámara y visibilidad, y contornos parametrizables.
 - **Contornos parametrizables**: las isolíneas se calculan sobre la malla
   distancia–elevación de la cortina y se proyectan al trazado real, de modo que
   los mismos valores (p. ej. 300 y 720 m/s) aparecen en 3D y en los cortes 2D.
