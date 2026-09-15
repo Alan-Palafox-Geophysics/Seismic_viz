@@ -376,6 +376,17 @@ def plot_3d_variable(
         Valores de ``var_color`` en los que se dibuja una isolínea negra
         sobre la cortina (sólo en ``mode='surface'``).
     """
+    faltantes = [
+        c for c in (var_color, x_col, y_col, z_col) if c not in df.columns
+    ]
+    if faltantes:
+        raise ValueError(
+            f"El DataFrame no tiene las columnas {faltantes}. Disponibles: "
+            f"{sorted(df.columns)}. Al mezclar perfiles de distinto origen "
+            "(por ejemplo, uno de Vs del pipeline y una línea sintetizada sólo "
+            "en Vp), filtre antes los que no contengan la variable elegida."
+        )
+
     vmin, vmax = _rango_color(df, var_color, fig, vmin, vmax)
     escala = resolver_colorscale(cmap)
 

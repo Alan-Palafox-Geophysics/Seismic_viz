@@ -1251,7 +1251,9 @@ def sintetizar_linea_kriging(
 
     df_final = objetivo[["Xo", "X", "Y", "Elevacion", "Z_superficie", "Profundidad"]].copy()
     df_final[variable] = est
-    df_final["Varianza_kriging"] = var
+    # La varianza se nombra por variable para que dos síntesis sucesivas
+    # (Vp y luego Vs) sobre la misma línea puedan convivir en un solo perfil.
+    df_final[f"Varianza_{variable}"] = var
     df_final["Z"] = df_final["Elevacion"]
     df_final = df_final.sort_values(["Xo", "Elevacion"], ascending=[True, False]).reset_index(
         drop=True

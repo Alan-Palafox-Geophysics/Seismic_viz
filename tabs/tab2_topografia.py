@@ -40,6 +40,22 @@ from core.prediccion import (
 COLS_ENTRENAMIENTO = ["Linea", "X", "Y", "Z", "Profundidad", "Elevacion", "Vs", "Vp"]
 
 
+def _rerun() -> None:
+    """
+    Relanza el script con el nombre que tenga la API en esta versión.
+
+    ``st.rerun()`` existe desde Streamlit 1.27; antes era
+    ``st.experimental_rerun()``.  Si no hay ninguna de las dos, se continúa
+    sin relanzar: el perfil ya quedó registrado y aparecerá en cuanto haya
+    cualquier otra interacción.
+    """
+    for nombre in ("rerun", "experimental_rerun"):
+        fn = getattr(st, nombre, None)
+        if callable(fn):
+            fn()
+            return
+
+
 def _registrar_perfil(nombre: str, df, topo_linea, origen: str) -> None:
     """
     Guarda un perfil 2D en la sesión y lo deja seleccionado en el Tab 3.
@@ -61,6 +77,85 @@ def _registrar_perfil(nombre: str, df, topo_linea, origen: str) -> None:
         if nombre not in seleccion:
             seleccion.append(nombre)
         st.session_state["t3_sel"] = seleccion
+
+
+def _etiqueta_origen(df: pd.DataFrame, base: str) -> str:
+    """Describe un perfil por las variables de velocidad que ya contiene."""
+    presentes = [c for c in ("Vp", "Vs") if c in df.columns]
+    return f"{base} {'+'.join(presentes)}" if presentes else base
+
+
+def _fusionar_sintetica(
+    nombre: str,
+    df_nuevo: pd.DataFrame,
+    variable: str,
+    topo_linea: pd.DataFrame,
+) -> str | None:
+    """
+    Agrega la variable recién sintetizada al perfil de esa línea, **sin borrar
+    lo que ya tuviera**.
+
+    Sintetizar Vp y después Vs sobre la misma línea objetivo produce dos
+    mallas con idéntica geometría (misma topografía, misma profundidad y
+    mismo ``dz``), así que la segunda sólo aporta columnas nuevas.  Se
+    empalman por ``(Xo, Elevacion)``; si el usuario cambió la geometría entre
+    una síntesis y otra las mallas no casan, y entonces el perfil se
+    reemplaza avisándolo en vez de mezclar nodos que no se corresponden.
+
+    Returns
+    -------
+    str | None
+        Aviso para el usuario cuando hubo que reemplazar, o ``None``.
+    """
+    perfiles = st.session_state.setdefault("perfiles_2d", {})
+    previo = perfiles.get(nombre)
+    aviso = None
+
+    claves = ["Xo", "Elevacion"]
+    fusionado = None
+
+    if previo is not None and isinstance(previo.get("df"), pd.DataFrame):
+        df_previo = previo["df"]
+        if all(c in df_previo.columns for c in claves) and all(
+            c in df_nuevo.columns for c in claves
+        ):
+            aportadas = [variable] + [
+                c for c in df_nuevo.columns if c.startswith("Varianza_")
+            ]
+            izq = df_previo.drop(columns=aportadas, errors="ignore").copy()
+            izq["_k"] = list(zip(izq["Xo"].round(4), izq["Elevacion"].round(4)))
+
+            der = df_nuevo.copy()
+            der["_k"] = list(zip(der["Xo"].round(4), der["Elevacion"].round(4)))
+            mapa = der.set_index("_k")[aportadas]
+            mapa = mapa[~mapa.index.duplicated(keep="first")]
+
+            unido = izq.join(mapa, on="_k")
+            cobertura = float(unido[variable].notna().mean())
+
+            if cobertura >= 0.95:
+                fusionado = unido.drop(columns=["_k"])
+            else:
+                aviso = (
+                    f"La malla de esta síntesis no coincide con la del perfil "
+                    f"«{nombre}» que ya existía (sólo empalma el "
+                    f"{100 * cobertura:.0f} % de los nodos): probablemente cambió "
+                    "la profundidad o el paso vertical. El perfil se reemplazó. "
+                    "Para conservar ambas variables, vuelva a sintetizarlas con "
+                    "la misma profundidad y el mismo dz."
+                )
+
+    df_final = fusionado if fusionado is not None else df_nuevo
+    df_final = df_final.copy()
+    df_final["Linea"] = nombre
+
+    _registrar_perfil(
+        nombre,
+        df_final,
+        topo_linea,
+        _etiqueta_origen(df_final, "sintética") + " · kriging 3D",
+    )
+    return aviso
 
 
 def _sincronizar_seleccion_3d() -> None:
@@ -266,7 +361,7 @@ def _panel_prediccion() -> None:
         st.write("")
         if st.button("🗑️ Vaciar lista", use_container_width=True):
             st.session_state["asignadas"] = {}
-            st.rerun()
+            _rerun()
 
     with st.expander("Configuración del pipeline", expanded=True):
         h1, h2, h3, h4 = st.columns(4)
@@ -583,7 +678,7 @@ def _panel_perfiles() -> None:
         if st.button("🗑️ Eliminar este perfil", use_container_width=True):
             st.session_state["perfiles_2d"].pop(nombre, None)
             _sincronizar_seleccion_3d()
-            st.rerun()
+            _rerun()
 
     numericas = [
         c
@@ -807,16 +902,21 @@ def _panel_sintetica() -> None:
                     float(dz),
                 )
             # El nombre del perfil es el de la «Línea objetivo», tal cual.
+            # Si esa línea ya se sintetizó en la otra variable, ambas se
+            # acumulan en un único perfil en vez de sobrescribirse.
             nombre = str(linea_s)
-            df_sint["Linea"] = nombre
-            _registrar_perfil(nombre, df_sint, topo_obj, f"sintética {variable} · kriging 3D")
+            aviso_fusion = _fusionar_sintetica(nombre, df_sint, variable, topo_obj)
 
+            df_guardado = st.session_state["perfiles_2d"][nombre]["df"]
+            variables = ", ".join(c for c in ("Vp", "Vs") if c in df_guardado.columns)
             st.session_state["aviso_sintetica"] = (
-                f"Línea sintética «{nombre}» generada: {info['n_objetivo']} nodos a "
-                f"partir de {info['n_fuente']} puntos fuente "
-                f"(motor: {info['motor_kriging']}). Variograma: {info['variograma']}"
+                f"Línea sintética «{nombre}» — {variable} generada con "
+                f"{info['n_objetivo']} nodos a partir de {info['n_fuente']} puntos "
+                f"fuente (motor: {info['motor_kriging']}). "
+                f"El perfil contiene ahora: {variables}."
             )
-            st.rerun()
+            st.session_state["aviso_fusion"] = aviso_fusion
+            _rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +944,9 @@ def render() -> None:
         aviso = st.session_state.pop("aviso_sintetica", None)
         if aviso:
             st.success(aviso)
+        aviso_fusion = st.session_state.pop("aviso_fusion", None)
+        if aviso_fusion:
+            st.warning(aviso_fusion)
 
         st.divider()
         _panel_agregar(df_topo)

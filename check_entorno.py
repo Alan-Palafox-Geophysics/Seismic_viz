@@ -91,6 +91,30 @@ def main() -> int:
 
     print("-" * 72)
 
+    # Versiones mínimas que la aplicación necesita para funcionar completa.
+    MINIMOS = {"streamlit": (1, 36), "plotly": (5, 20), "pandas": (2, 1)}
+    viejos = []
+    for modulo, paquete, _ in PAQUETES:
+        if paquete not in MINIMOS:
+            continue
+        try:
+            mod = importlib.import_module(modulo)
+        except Exception:
+            continue
+        bruto = getattr(mod, "__version__", "")
+        partes = []
+        for token in str(bruto).split(".")[:2]:
+            digitos = "".join(c for c in token if c.isdigit())
+            partes.append(int(digitos) if digitos else 0)
+        if len(partes) == 2 and tuple(partes) < MINIMOS[paquete]:
+            viejos.append((paquete, bruto, ".".join(map(str, MINIMOS[paquete]))))
+
+    if viejos:
+        print("\n>>> VERSIONES DEMASIADO ANTIGUAS <<<\n")
+        for paquete, actual, minimo in viejos:
+            print(f"    {paquete}: {actual} instalado, se requiere >= {minimo}")
+        print("\n    pip install --upgrade " + " ".join(p for p, _, _ in viejos) + "\n")
+
     if fallas_abi:
         print("\n>>> CONFLICTO DE BINARIOS CON NUMPY <<<\n")
         print(

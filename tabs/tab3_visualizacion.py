@@ -257,8 +257,32 @@ def render() -> None:
                 pass
 
     # ---------------------------------------------------------------- figura
+    # La lista de variables es la unión de columnas de todos los perfiles
+    # seleccionados, pero cada perfil se dibuja por separado: los que no
+    # tengan la variable elegida se omiten en vez de romper el render. Ocurre
+    # al mezclar, por ejemplo, un perfil de Vs del pipeline con una línea
+    # sintetizada sólo en Vp.
+    dibujables = [
+        n
+        for n in seleccion
+        if var in fuentes[n].columns and z_col in fuentes[n].columns
+    ]
+    omitidos = [n for n in seleccion if n not in dibujables]
+    if omitidos:
+        st.info(
+            f"Sin la columna «{var}» (o «{z_col}»): {', '.join(omitidos)}. "
+            "Se omiten en esta vista. Elija otra variable, o sintetice esa "
+            "línea en la variable que le falta."
+        )
+    if not dibujables:
+        st.warning(
+            f"Ninguno de los perfiles seleccionados tiene «{var}». "
+            "Elija otra variable."
+        )
+        return
+
     fig = None
-    for nombre in seleccion:
+    for nombre in dibujables:
         df_i = fuentes[nombre].copy()
         df_i["_Perfil"] = nombre
         fig = plot_3d_variable(
@@ -278,10 +302,12 @@ def render() -> None:
             contornos=contornos or None,
             name_prefix="",
             titulo=f"Modelo 3D de {var}",
-            subtitulo=" · ".join(seleccion),
+            subtitulo=" · ".join(dibujables),
         )
 
-    z_default = float(df_todos[z_col].min())
+    z_default = float(
+        min(fuentes[n][z_col].min() for n in dibujables)
+    )
     fig = _mapa_base(fig, z_default)
 
     st.plotly_chart(fig, use_container_width=True, height=760)
@@ -302,7 +328,7 @@ def render() -> None:
     )
     b1, b2, b3 = st.columns(3)
     with b1:
-        perfil_2d = st.selectbox("Perfil", seleccion, key="t3_p2d")
+        perfil_2d = st.selectbox("Perfil", dibujables, key="t3_p2d")
     with b2:
         cmap_2d = st.selectbox(
             "Escala",
