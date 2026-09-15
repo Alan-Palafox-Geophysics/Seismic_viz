@@ -16,9 +16,10 @@ Novedades respecto al módulo original
   coordenadas (:func:`leer_extension_geotiff`), además de JPG/PNG con
   esquinas declaradas por el usuario.
 
-Se conserva intacto el criterio de color de los datos (``colorscale``,
-por defecto ``rainbow``) y la cabecera tipo dashboard con los menús de
-cámara y visibilidad.
+El criterio de color es el mismo que el de los cortes 2D (incluida la rampa
+personalizada, traducida a una ``colorscale`` de Plotly), la barra de color
+va horizontal abajo a la derecha, y el único control de la cabecera es la
+vista de cámara: mostrar u ocultar líneas se hace con un click en la leyenda.
 """
 
 from __future__ import annotations
@@ -119,6 +120,30 @@ def _rango_color(df, var_color, fig, vmin, vmax):
             data_max = max(data_max, max(prev_max))
 
     return (vmin if vmin is not None else data_min, vmax if vmax is not None else data_max)
+
+
+def _colorbar_horizontal(titulo: str) -> dict:
+    """
+    Barra de color horizontal anclada abajo a la derecha del lienzo.
+
+    Se saca del costado para no competir con la leyenda y para que la escena
+    3D use todo el ancho disponible.
+    """
+    return dict(
+        title=dict(text=titulo, side="top"),
+        orientation="h",
+        x=0.98,
+        xanchor="right",
+        y=0.02,
+        yanchor="bottom",
+        len=0.38,
+        thickness=14,
+        outlinewidth=0,
+        bgcolor="rgba(255,255,255,0.75)",
+        bordercolor="#d7d9dd",
+        borderwidth=1,
+        tickfont=dict(size=11),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -370,12 +395,15 @@ def plot_3d_variable(
     else:
         grupos = [None]
 
-    prefix = name_prefix or (line_col if line_col else "Datos")
+    # Un prefijo vacío deja el nombre del grupo tal cual: la leyenda es ahora
+    # el único control de visibilidad, así que conviene que diga exactamente
+    # el nombre de la línea.
+    prefix = name_prefix if name_prefix is not None else (line_col or "Datos")
     primer_contorno = True
 
     for grupo in grupos:
         df_g = df if grupo is None else df.loc[df[line_col] == grupo]
-        nombre = f"{prefix} {grupo}" if grupo is not None else prefix
+        nombre = (f"{prefix} {grupo}".strip() if grupo is not None else prefix)
 
         curtain = None
         usar_surface = mode == "surface"
@@ -397,7 +425,9 @@ def plot_3d_variable(
                     cmax=vmax,
                     opacity=surface_opacity,
                     showscale=show_colorbar,
-                    colorbar=dict(title=f"{var_color} [m/s]") if show_colorbar else None,
+                    colorbar=_colorbar_horizontal(f"{var_color} [m/s]")
+                    if show_colorbar
+                    else None,
                     name=nombre,
                     hovertemplate=(
                         f"{nombre}<br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}"
@@ -431,7 +461,9 @@ def plot_3d_variable(
                         cmin=vmin,
                         cmax=vmax,
                         opacity=marker_opacity,
-                        colorbar=dict(title=f"{var_color} [m/s]") if show_colorbar else None,
+                        colorbar=_colorbar_horizontal(f"{var_color} [m/s]")
+                    if show_colorbar
+                    else None,
                         showscale=show_colorbar,
                     ),
                     line=dict(width=2, color="gray") if connect_points else None,
@@ -477,30 +509,17 @@ def plot_3d_variable(
 
 
 def _barra_de_controles(fig: go.Figure) -> go.Figure:
-    """Cabecera con menús de cámara, visibilidad y selección de línea."""
+    """
+    Cabecera con el único control que queda: la vista de cámara.
+
+    Los menús de visibilidad y de selección de línea se retiraron; mostrar u
+    ocultar una línea se hace con un click en la leyenda, que es el
+    comportamiento nativo de Plotly y no duplica controles.
+    """
     botones_camara = [
         dict(label=nombre, method="relayout", args=[{"scene.camera": cam}])
         for nombre, cam in _CAMARAS.items()
     ]
-
-    botones_lineas = [
-        dict(
-            label=(tr.name if len(tr.name) <= 22 else tr.name[:20] + "…"),
-            method="restyle",
-            args=[{"visible": True}, [i]],
-            args2=[{"visible": "legendonly"}, [i]],
-        )
-        for i, tr in enumerate(fig.data)
-        if tr.name and tr.name != NOMBRE_BASE
-    ]
-
-    estilo = dict(
-        bgcolor="#ffffff",
-        bordercolor="#d7d9dd",
-        borderwidth=1,
-        font=dict(size=12, color="#2b2b33"),
-        pad=dict(l=10, r=10, t=4, b=4),
-    )
 
     fig.update_layout(
         updatemenus=[
@@ -513,38 +532,12 @@ def _barra_de_controles(fig: go.Figure) -> go.Figure:
                 xanchor="left",
                 yanchor="top",
                 showactive=True,
-                **estilo,
-            ),
-            dict(
-                type="buttons",
-                direction="right",
-                buttons=[
-                    dict(label="Mostrar todas", method="restyle", args=[{"visible": True}]),
-                    dict(
-                        label="Ocultar todas",
-                        method="restyle",
-                        args=[{"visible": "legendonly"}],
-                    ),
-                ],
-                x=0.20,
-                y=0.885,
-                xanchor="left",
-                yanchor="top",
-                showactive=False,
-                **estilo,
-            ),
-            dict(
-                type="dropdown",
-                direction="down",
-                buttons=botones_lineas,
-                x=0.44,
-                y=0.885,
-                xanchor="left",
-                yanchor="top",
-                showactive=False,
-                active=-1,
-                **estilo,
-            ),
+                bgcolor="#ffffff",
+                bordercolor="#d7d9dd",
+                borderwidth=1,
+                font=dict(size=12, color="#2b2b33"),
+                pad=dict(l=10, r=10, t=4, b=4),
+            )
         ],
         annotations=[
             dict(
@@ -556,27 +549,7 @@ def _barra_de_controles(fig: go.Figure) -> go.Figure:
                 showarrow=False,
                 xanchor="left",
                 font=dict(size=11, color="#6b7280"),
-            ),
-            dict(
-                text="Visibilidad",
-                x=0.20,
-                y=0.925,
-                xref="paper",
-                yref="paper",
-                showarrow=False,
-                xanchor="left",
-                font=dict(size=11, color="#6b7280"),
-            ),
-            dict(
-                text="Seleccionar línea",
-                x=0.44,
-                y=0.925,
-                xref="paper",
-                yref="paper",
-                showarrow=False,
-                xanchor="left",
-                font=dict(size=11, color="#6b7280"),
-            ),
+            )
         ],
     )
     return fig

@@ -26,6 +26,7 @@ import streamlit as st
 
 from core import espacial, servicios
 from core.kriging import MODELOS_VARIOGRAMA, PYKRIGE_DISPONIBLE
+from core.plots_2d import CMAPS_DISPONIBLES
 from core.prediccion import (
     MODELOS_DISPONIBLES,
     OPTUNA_DISPONIBLE,
@@ -37,6 +38,39 @@ from core.prediccion import (
 
 # Columnas que el pipeline necesita en el conjunto de entrenamiento.
 COLS_ENTRENAMIENTO = ["Linea", "X", "Y", "Z", "Profundidad", "Elevacion", "Vs", "Vp"]
+
+
+def _registrar_perfil(nombre: str, df, topo_linea, origen: str) -> None:
+    """
+    Guarda un perfil 2D en la sesión y lo deja seleccionado en el Tab 3.
+
+    El multiselect del Tab 3 conserva su valor entre ejecuciones, así que su
+    ``default`` se ignora una vez que el usuario tocó el control: hay que
+    añadir el perfil nuevo a la selección almacenada para que se vea sin
+    tener que elegirlo a mano.
+    """
+    st.session_state.setdefault("perfiles_2d", {})
+    st.session_state["perfiles_2d"][nombre] = {
+        "nombre": nombre,
+        "df": df,
+        "topo_linea": topo_linea,
+        "origen": origen,
+    }
+    if "t3_sel" in st.session_state:
+        seleccion = list(st.session_state["t3_sel"])
+        if nombre not in seleccion:
+            seleccion.append(nombre)
+        st.session_state["t3_sel"] = seleccion
+
+
+def _sincronizar_seleccion_3d() -> None:
+    """Depura de la selección del Tab 3 los perfiles que ya no existen."""
+    if "t3_sel" not in st.session_state:
+        return
+    disponibles = set(st.session_state.get("perfiles_2d", {}))
+    st.session_state["t3_sel"] = [
+        n for n in st.session_state["t3_sel"] if n in disponibles
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -412,12 +446,12 @@ def _generar(
         df_linea = grid.loc[grid["Linea"] == nombre].copy()
         if df_linea.empty:
             continue
-        st.session_state["perfiles_2d"][nombre] = {
-            "nombre": nombre,
-            "df": df_linea.reset_index(drop=True),
-            "topo_linea": asignadas[nombre]["topo_linea"],
-            "origen": "pipeline Vs",
-        }
+        _registrar_perfil(
+            nombre,
+            df_linea.reset_index(drop=True),
+            asignadas[nombre]["topo_linea"],
+            "pipeline Vs",
+        )
 
 
 def _mostrar_resultados() -> None:
@@ -515,52 +549,131 @@ def _mostrar_resultados() -> None:
             height=230,
         )
 
-    _panel_perfiles(resultado)
 
-
-def _panel_perfiles(resultado) -> None:
+def _panel_perfiles() -> None:
+    """
+    Catálogo de perfiles 2D disponibles — tanto los que produjo el pipeline de
+    Vs como las líneas sintetizadas por kriging.  Es independiente de que haya
+    corrido el modelo: una línea sintética se ve aquí en cuanto se genera.
+    """
     perfiles = st.session_state.get("perfiles_2d", {})
     if not perfiles:
         return
 
+    resultado = st.session_state.get("resultado_vs")
+
     st.divider()
     st.markdown("##### Perfiles 2D generados")
-    nombre = st.selectbox("Perfil", list(perfiles.keys()), key="t2_perfil_sel")
-    df = perfiles[nombre]["df"]
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        nombre = st.selectbox(
+            "Perfil",
+            list(perfiles.keys()),
+            key="t2_perfil_sel",
+            format_func=lambda n: (
+                f"{n}  ·  {perfiles[n].get('origen', 'pipeline Vs')}"
+            ),
+        )
+    entrada = perfiles[nombre]
+    df = entrada["df"]
+    origen = entrada.get("origen", "pipeline Vs")
+    with c2:
+        st.write("")
+        if st.button("🗑️ Eliminar este perfil", use_container_width=True):
+            st.session_state["perfiles_2d"].pop(nombre, None)
+            _sincronizar_seleccion_3d()
+            st.rerun()
+
+    numericas = [
+        c
+        for c in ["Vs", "Vs_predicho", "Vs_predicho_ML", "Vp"]
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    if not numericas:
+        st.warning(f"El perfil «{nombre}» no tiene ninguna variable de velocidad.")
+        return
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Nodos", len(df))
-    k2.metric("Rango de Vs", f"{df['Vs'].min():.0f} – {df['Vs'].max():.0f} m/s")
+    k2.metric("Origen", origen)
+    principal = numericas[0]
+    k3.metric(
+        f"Rango de {principal}",
+        f"{df[principal].min():.0f} – {df[principal].max():.0f} m/s",
+    )
     if "flag_extrapolacion_general" in df.columns:
-        k3.metric(
-            "Extrapolación general", f"{100 * df['flag_extrapolacion_general'].mean():.1f} %"
-        )
         k4.metric(
-            "Extrapolación petrofísica",
-            f"{100 * df['flag_extrapolacion_petrofisica'].mean():.1f} %",
+            "Extrapolación general",
+            f"{100 * df['flag_extrapolacion_general'].mean():.1f} %",
         )
-    if "zona_confianza_espacial" in df.columns:
-        reparto = (100 * df["zona_confianza_espacial"].value_counts(normalize=True)).round(1)
+
+    if "zona_confianza_espacial" in df.columns and resultado is not None:
+        reparto = (
+            100 * df["zona_confianza_espacial"].value_counts(normalize=True)
+        ).round(1)
         st.caption(
-            f"Zona de confianza espacial (separación típica entre MASW = "
+            "Zona de confianza espacial (separación típica entre MASW = "
             f"{resultado['escala_referencia_masw']:.1f} m): {reparto.to_dict()}"
         )
 
-    st.dataframe(df.head(300), use_container_width=True, height=260)
+    # ------------------------------------------------------------ vista 2D
+    v1, v2, v3, v4 = st.columns(4)
+    with v1:
+        variable = st.selectbox("Variable", numericas, key="t2_var_vista")
+    with v2:
+        prof = st.number_input(
+            "Profundidad del corte (m)", 1.0, 300.0, 30.0, 1.0, key="t2_prof_vista"
+        )
+    with v3:
+        cmap = st.selectbox("Escala", CMAPS_DISPONIBLES, index=0, key="t2_cmap_vista")
+    with v4:
+        texto_cont = st.text_input("Contornos", value="300, 720", key="t2_cont_vista")
 
+    contornos = []
+    for token in texto_cont.split(","):
+        token = token.strip()
+        if token:
+            try:
+                contornos.append(float(token))
+            except ValueError:
+                pass
+
+    col_x = "Xo" if "Xo" in df.columns else "X"
+    col_y = "Elevacion" if "Elevacion" in df.columns else "Z"
+    try:
+        png = servicios.corte_2d_png(
+            df,
+            col_x,
+            col_y,
+            variable,
+            "linear",
+            float(df[variable].min()),
+            float(df[variable].max()),
+            float(prof),
+            cmap,
+            tuple(contornos),
+            200,
+            f"{nombre} — {variable}",
+        )
+        st.image(png, use_container_width=True)
+    except Exception as exc:
+        png = None
+        st.warning(f"No se pudo dibujar la sección: {exc}")
+
+    with st.expander("Tabla de datos", expanded=False):
+        st.dataframe(df.head(300), use_container_width=True, height=260)
+
+    # --------------------------------------------------------- exportación
+    base = nombre.replace(" · ", "_").replace(" ", "_")
     x1, x2, x3 = st.columns(3)
     with x1:
-        candidatas = [
-            c for c in ["Vs", "Vs_predicho", "Vs_predicho_ML", "Vp"] if c in df.columns
-        ]
-        variable = st.selectbox("Variable a exportar", candidatas, key="t2_var_exp")
         eje_z = st.radio(
             "Eje Z del archivo",
             ["Elevación (msnm)", "Profundidad (m)"],
             index=0,
             key="t2_ejez",
         )
-    base = nombre.replace(" · ", "_").replace(" ", "_")
     with x2:
         st.write("")
         st.download_button(
@@ -581,20 +694,29 @@ def _panel_perfiles(resultado) -> None:
         )
     with x3:
         st.write("")
-        st.download_button(
-            "⬇️ Modelo completo del bloque (CSV)",
-            servicios.dataframe_a_csv(resultado["grid_df_predicho"]),
-            file_name="modelos_2d_vp_vs.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        st.download_button(
-            "⬇️ Artefactos del modelo (joblib)",
-            artefactos_a_bytes(resultado),
-            file_name="modelo_vs.joblib",
-            mime="application/octet-stream",
-            use_container_width=True,
-        )
+        if png is not None:
+            st.download_button(
+                "⬇️ Sección 2D (PNG, 300 dpi)",
+                png,
+                file_name=f"Seccion_{base}_{variable}.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+        if resultado is not None:
+            st.download_button(
+                "⬇️ Modelo completo del bloque (CSV)",
+                servicios.dataframe_a_csv(resultado["grid_df_predicho"]),
+                file_name="modelos_2d_vp_vs.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.download_button(
+                "⬇️ Artefactos del modelo (joblib)",
+                artefactos_a_bytes(resultado),
+                file_name="modelo_vs.joblib",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -684,20 +806,17 @@ def _panel_sintetica() -> None:
                     float(prof_max),
                     float(dz),
                 )
-            nombre = f"{zona_s} · {linea_s} (sintética {variable})"
+            # El nombre del perfil es el de la «Línea objetivo», tal cual.
+            nombre = str(linea_s)
             df_sint["Linea"] = nombre
-            st.session_state.setdefault("perfiles_2d", {})
-            st.session_state["perfiles_2d"][nombre] = {
-                "nombre": nombre,
-                "df": df_sint,
-                "topo_linea": topo_obj,
-                "origen": "kriging 3D",
-            }
-            st.success(
-                f"Línea sintética generada: {info['n_objetivo']} nodos a partir de "
-                f"{info['n_fuente']} puntos fuente (motor: {info['motor_kriging']})."
+            _registrar_perfil(nombre, df_sint, topo_obj, f"sintética {variable} · kriging 3D")
+
+            st.session_state["aviso_sintetica"] = (
+                f"Línea sintética «{nombre}» generada: {info['n_objetivo']} nodos a "
+                f"partir de {info['n_fuente']} puntos fuente "
+                f"(motor: {info['motor_kriging']}). Variograma: {info['variograma']}"
             )
-            st.caption(f"Variograma: {info['variograma']}")
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -709,21 +828,30 @@ def render() -> None:
     )
 
     df_topo = _catalogo_topografia()
+
     if df_topo is None:
         st.info(
             "Cargue el catálogo topográfico para continuar. Acepta separadores por "
             "tabulador, coma o espacios, con o sin encabezado."
         )
-        return
+    else:
+        st.session_state["topografia"] = df_topo
+        st.success(
+            f"{len(df_topo)} estaciones · {df_topo['Zona_Nombre'].nunique()} zonas · "
+            f"{df_topo.groupby(['Zona_Nombre', 'Linea']).ngroups} líneas."
+        )
 
-    st.session_state["topografia"] = df_topo
-    st.success(
-        f"{len(df_topo)} estaciones · {df_topo['Zona_Nombre'].nunique()} zonas · "
-        f"{df_topo.groupby(['Zona_Nombre', 'Linea']).ngroups} líneas."
-    )
+        aviso = st.session_state.pop("aviso_sintetica", None)
+        if aviso:
+            st.success(aviso)
 
-    st.divider()
-    _panel_agregar(df_topo)
-    st.divider()
-    _panel_prediccion()
-    _panel_sintetica()
+        st.divider()
+        _panel_agregar(df_topo)
+        st.divider()
+        _panel_prediccion()
+        _panel_sintetica()
+
+    # El catálogo de perfiles va al final y no depende ni de la topografía ni
+    # de que haya corrido el pipeline: una línea sintética aparece aquí en
+    # cuanto se genera.
+    _panel_perfiles()

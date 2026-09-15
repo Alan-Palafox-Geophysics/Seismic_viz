@@ -138,13 +138,21 @@ def render() -> None:
         )
         return
 
-    seleccion = st.multiselect(
-        "Perfiles a renderizar",
-        list(fuentes.keys()),
-        default=list(fuentes.keys())[:3],
-        key="t3_sel",
-    )
+    # Streamlit conserva el valor del multiselect entre ejecuciones y entonces
+    # ignora `default`. Se siembra la clave la primera vez y, en adelante, se
+    # depuran las entradas que ya no existen; los perfiles nuevos los añade
+    # quien los registra (Tab 2), para que aparezcan seleccionados de una vez.
+    opciones = list(fuentes.keys())
+    if "t3_sel" not in st.session_state:
+        st.session_state["t3_sel"] = opciones[:3]
+    else:
+        vigentes = [n for n in st.session_state["t3_sel"] if n in fuentes]
+        if vigentes != list(st.session_state["t3_sel"]):
+            st.session_state["t3_sel"] = vigentes
+
+    seleccion = st.multiselect("Perfiles a renderizar", opciones, key="t3_sel")
     if not seleccion:
+        st.info("Seleccione al menos un perfil para renderizar.")
         return
 
     df_todos = pd.concat(
