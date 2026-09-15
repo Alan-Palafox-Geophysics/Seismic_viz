@@ -101,6 +101,16 @@ class PipelineConfig:
     apply_residual_kriging: bool = True
     variogram_model: str = "spherical"
 
+    # Cómo se reparte espacialmente la corrección de residuos:
+    #   "por_linea" — un único desplazamiento constante por línea, igual al
+    #       residuo medio de su MASW.  Es lo que producía el flujo original,
+    #       donde X e Y eran constantes dentro de cada línea, y es lo único
+    #       que sostiene la geometría típica de un MASW por tendido.
+    #   "planta"   — kriging ordinario en (X, Y).  Sólo tiene sentido con
+    #       varios sondeos repartidos: con uno por línea es un interpolador
+    #       exacto de rango diminuto y abre un cráter alrededor del sondeo.
+    residual_mode: str = "por_linea"
+
     flag_extrapolation: bool = True
     compute_spatial_confidence: bool = True
 
@@ -772,12 +782,39 @@ def krige_residuals(
     config: PipelineConfig,
 ) -> Tuple[np.ndarray, str]:
     """
-    Interpola en planta los residuos ``Vs_real − Vs_ML`` del entrenamiento
-    sobre las coordenadas de la malla 2D.  La corrección resulta constante a
-    lo largo de cada vertical, que es exactamente el comportamiento de los
-    modelos ``modelos_2d_vp_vs_*.csv`` de referencia.
+    Reparte espacialmente los residuos ``Vs_real − Vs_ML`` del entrenamiento
+    sobre la malla 2D.
+
+    Con ``residual_mode='por_linea'`` cada línea recibe un desplazamiento
+    constante, igual al residuo medio de su propio MASW.  Es el
+    comportamiento del flujo original —donde ``X`` e ``Y`` eran constantes
+    dentro de cada línea, de modo que el kriging sólo podía dar un valor por
+    línea— y el único defendible cuando hay un sondeo por tendido: corrige el
+    sesgo sistemático de esa línea sin inventar estructura lateral.
+
+    Con ``residual_mode='planta'`` se hace kriging ordinario en (X, Y).  Eso
+    exige varios sondeos repartidos por el área; con uno solo por línea, el
+    kriging es un interpolador exacto de rango diminuto y deja la corrección
+    en cero salvo en unos pocos metros alrededor del sondeo, abriendo un
+    cráter justo en el centro del tendido.
     """
     x_col, y_col = config.coord_cols
+
+    if config.residual_mode == "por_linea" and config.line_col in train_df.columns:
+        if config.line_col in grid_df.columns:
+            residuo_medio = (
+                pd.Series(residuos, index=train_df[config.line_col].to_numpy())
+                .groupby(level=0)
+                .mean()
+            )
+            global_medio = float(np.mean(residuos)) if len(residuos) else 0.0
+            correccion = (
+                grid_df[config.line_col]
+                .map(residuo_medio)
+                .fillna(global_medio)
+                .to_numpy(float)
+            )
+            return correccion, "constante por línea"
 
     correccion, motor = kriging_ordinario_2d(
         train_df[x_col].values,

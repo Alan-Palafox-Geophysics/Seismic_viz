@@ -66,7 +66,9 @@ _DASHBOARD_LAYOUT = dict(
     font=dict(family="Arial, sans-serif", color="#2b2b33", size=13),
     margin=dict(l=10, r=10, t=90, b=10),
     legend=dict(
-        title=dict(text="Líneas (click para mostrar/ocultar)"),
+        title=dict(text="Click para mostrar / ocultar"),
+        groupclick="togglegroup",
+        itemsizing="constant",
         bgcolor="rgba(255,255,255,0.85)",
         bordercolor="#d7d9dd",
         borderwidth=1,
@@ -289,7 +291,6 @@ def agregar_contornos_3d(
     nombre_linea: str,
     color: str = "black",
     grosor: float = 3.0,
-    mostrar_leyenda: bool = True,
 ) -> go.Figure:
     """
     Superpone líneas de isovalor sobre una cortina 3D.
@@ -298,15 +299,29 @@ def agregar_contornos_3d(
     de la cortina y luego se proyectan al trazado real (X, Y), de modo que
     la isolínea sigue estrictamente la geometría de la línea y su
     topografía.
+
+    Cada nivel recibe **una sola entrada de leyenda en toda la figura**, y
+    todos sus segmentos comparten ``legendgroup``: un click apaga o enciende
+    ese isovalor en todas las líneas a la vez.
     """
+    # Niveles que ya tienen entrada de leyenda en la figura
+    ya_en_leyenda = {
+        tr.legendgroup for tr in fig.data if getattr(tr, "legendgroup", None)
+    }
+    # El rótulo del bloque se escribe una sola vez, sobre el primer nivel que
+    # aparezca en toda la figura; los demás quedan debajo sin encabezado.
+    falta_titulo = not any(
+        str(g or "").startswith("contorno::") for g in ya_en_leyenda
+    )
     # Los contornos se calculan sobre la malla finita (``Z_cont``); los huecos
     # ya vienen marcados como NaN en ``V``, que es lo que contourpy respeta.
     D, V = curtain["D"], curtain["V"]
     Z = curtain.get("Z_cont", curtain["Z"])
     d, x, y = curtain["d"], curtain["x"], curtain["y"]
 
-    primero = True
     for nivel in niveles:
+        grupo = f"contorno::{nivel:g}"
+        primero = grupo not in ya_en_leyenda
         for seg in _segmentos_contorno(D, Z, V, nivel):
             d_seg, z_seg = seg[:, 0], seg[:, 1]
             x_seg = np.interp(d_seg, d, x)
@@ -318,13 +333,22 @@ def agregar_contornos_3d(
                     z=z_seg,
                     mode="lines",
                     line=dict(width=grosor, color=color),
-                    name=f"Contorno {nivel:g} — {nombre_linea}",
-                    legendgroup=f"contorno_{nivel:g}",
-                    showlegend=mostrar_leyenda and primero,
-                    hovertemplate=f"Isovalor {nivel:g}<extra></extra>",
+                    name=f"Contorno {nivel:g}",
+                    legendgroup=grupo,
+                    legendgrouptitle=(
+                        dict(text="Contornos") if (primero and falta_titulo) else None
+                    ),
+                    legendrank=200,
+                    showlegend=primero,
+                    hovertemplate=(
+                        f"{nombre_linea}<br>Isovalor {nivel:g}<extra></extra>"
+                    ),
                 )
             )
+            if primero:
+                falta_titulo = False
             primero = False
+            ya_en_leyenda.add(grupo)
     return fig
 
 
@@ -410,7 +434,11 @@ def plot_3d_variable(
     # el único control de visibilidad, así que conviene que diga exactamente
     # el nombre de la línea.
     prefix = name_prefix if name_prefix is not None else (line_col or "Datos")
-    primer_contorno = True
+    # El título del grupo se pone una sola vez en toda la figura.
+    primer_perfil = not any(
+        str(getattr(tr, "legendgroup", "") or "").startswith("perfil::")
+        for tr in fig.data
+    )
 
     for grupo in grupos:
         df_g = df if grupo is None else df.loc[df[line_col] == grupo]
@@ -440,6 +468,15 @@ def plot_3d_variable(
                     if show_colorbar
                     else None,
                     name=nombre,
+                    # Las superficies de Plotly no salen en la leyenda por
+                    # defecto: sin esto el perfil no se podría encender ni
+                    # apagar con un click.
+                    showlegend=True,
+                    legendgroup=f"perfil::{nombre}",
+                    legendgrouptitle=dict(text="Perfiles") if primer_perfil else None,
+                    # Los perfiles se listan siempre antes que los contornos,
+                    # sin depender del orden en que se añadieron las trazas.
+                    legendrank=100,
                     hovertemplate=(
                         f"{nombre}<br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}"
                         f"<br>Z: %{{z:.1f}}<br>{var_color}: %{{surfacecolor:.2f}}<extra></extra>"
@@ -454,9 +491,7 @@ def plot_3d_variable(
                     nombre_linea=str(grupo) if grupo is not None else prefix,
                     color=color_contorno,
                     grosor=grosor_contorno,
-                    mostrar_leyenda=primer_contorno,
                 )
-                primer_contorno = False
         else:
             modo_trazo = "lines+markers" if connect_points else "markers"
             fig.add_trace(
@@ -479,6 +514,12 @@ def plot_3d_variable(
                     ),
                     line=dict(width=2, color="gray") if connect_points else None,
                     name=nombre,
+                    showlegend=True,
+                    legendgroup=f"perfil::{nombre}",
+                    legendgrouptitle=dict(text="Perfiles") if primer_perfil else None,
+                    # Los perfiles se listan siempre antes que los contornos,
+                    # sin depender del orden en que se añadieron las trazas.
+                    legendrank=100,
                     hovertemplate=(
                         f"{nombre}<br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}"
                         f"<br>Z: %{{z:.1f}}<br>{var_color}: %{{marker.color:.2f}}<extra></extra>"
@@ -487,6 +528,7 @@ def plot_3d_variable(
             )
 
         show_colorbar = False
+        primer_perfil = False
 
     # --- Layout base tipo dashboard --------------------------------------
     if nueva_figura:
@@ -701,6 +743,14 @@ def agregar_base_satelital_3d_color(
     return fig
 
 
-def figura_a_html(fig: go.Figure) -> bytes:
-    """Serializa la figura como HTML interactivo autocontenido."""
-    return fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
+def figura_a_html(fig: go.Figure, autocontenido: bool = True) -> bytes:
+    """
+    Serializa la figura como HTML interactivo.
+
+    Con ``autocontenido=True`` la librería de Plotly se incrusta en el propio
+    archivo: pesa unos megabytes más, pero se abre sin conexión.  Con la
+    variante por CDN, un cliente que abra el archivo sin internet vería una
+    página en blanco.
+    """
+    js = True if autocontenido else "cdn"
+    return fig.to_html(include_plotlyjs=js, full_html=True).encode("utf-8")

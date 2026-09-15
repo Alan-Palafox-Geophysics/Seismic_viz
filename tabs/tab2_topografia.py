@@ -331,12 +331,23 @@ def _panel_prediccion() -> None:
                 disabled=(cv_strategy == "line"),
             )
         with h3:
-            kriging_residual = st.checkbox(
-                "Regression Kriging de residuos", value=True, key="t2_krig"
+            modo_residual = st.selectbox(
+                "Corrección de residuos",
+                ["por línea (constante)", "en planta (kriging)", "sin corrección"],
+                index=0,
+                key="t2_modo_res",
+                help=(
+                    "‘por línea’ desplaza cada línea por el residuo medio de su "
+                    "MASW: corrige el sesgo sin inventar estructura lateral, y es "
+                    "lo que hacía el flujo original. ‘en planta’ hace kriging en "
+                    "(X, Y) y sólo tiene sentido con varios sondeos repartidos; "
+                    "con uno por tendido abre un cráter en el centro del perfil."
+                ),
             )
+            kriging_residual = modo_residual != "sin corrección"
             variograma = st.selectbox(
                 "Variograma", MODELOS_VARIOGRAMA, index=0, key="t2_var",
-                disabled=not kriging_residual,
+                disabled=(modo_residual != "en planta (kriging)"),
             )
         with h4:
             recortar = st.checkbox("Recorte físico de Vs", value=True, key="t2_clip")
@@ -419,6 +430,7 @@ def _panel_prediccion() -> None:
                     int(n_trials),
                     kriging_residual,
                     variograma,
+                    "planta" if modo_residual.startswith("en planta") else "por_linea",
                     recortar,
                     float(margen),
                     int(semilla),
@@ -442,6 +454,7 @@ def _generar(
     n_trials,
     kriging_residual,
     variograma,
+    modo_residual,
     recortar,
     margen,
     semilla,
@@ -465,6 +478,7 @@ def _generar(
         n_trials,
         kriging_residual,
         variograma,
+        modo_residual,
         recortar,
         margen,
         semilla,
